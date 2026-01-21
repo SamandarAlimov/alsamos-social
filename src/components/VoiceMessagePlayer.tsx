@@ -13,6 +13,8 @@ interface VoiceMessagePlayerProps {
   senderName?: string;
   messageId?: string;
   onPlay?: () => void;
+  /** All media messages in the conversation for sequential playback */
+  allMediaTracks?: MediaTrack[];
 }
 
 export function VoiceMessagePlayer({ 
@@ -22,7 +24,8 @@ export function VoiceMessagePlayer({
   autoPlay = false, 
   senderName, 
   messageId,
-  onPlay 
+  onPlay,
+  allMediaTracks = []
 }: VoiceMessagePlayerProps) {
   const { 
     currentTrack, 
@@ -32,7 +35,8 @@ export function VoiceMessagePlayer({
     play, 
     pause, 
     resume, 
-    seek 
+    seek,
+    setPlaylist
   } = useAudioPlayer();
   
   // Check if this is the currently playing track
@@ -57,7 +61,7 @@ export function VoiceMessagePlayer({
     });
   }, [url]);
 
-  // Intersection Observer for autoplay
+  // Visibility tracking (no autoplay - Telegram behavior)
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -66,27 +70,14 @@ export function VoiceMessagePlayer({
       (entries) => {
         const [entry] = entries;
         setIsVisible(entry.isIntersecting);
-        
-        if (autoPlay && entry.isIntersecting && entry.intersectionRatio > 0.5 && !isThisTrack) {
-          // Auto-play via global player
-          const track: MediaTrack = {
-            id: messageId || url,
-            url,
-            name: 'Voice message',
-            artist: senderName || 'Unknown',
-            title: 'Voice message',
-            senderName,
-            type: 'audio'
-          };
-          play(track);
-        }
+        // No autoplay on scroll - user must explicitly click to play
       },
       { threshold: [0, 0.5, 1] }
     );
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, [autoPlay, isThisTrack, messageId, url, senderName, play]);
+  }, []);
 
   // Load metadata for duration display when not playing
   useEffect(() => {
@@ -125,7 +116,7 @@ export function VoiceMessagePlayer({
         resume();
       }
     } else {
-      // Play via global player
+      // Create track for this message
       const track: MediaTrack = {
         id: messageId || url,
         url,
@@ -135,10 +126,21 @@ export function VoiceMessagePlayer({
         senderName,
         type: 'audio'
       };
-      play(track);
+      
+      // If we have a playlist, use it for sequential playback
+      if (allMediaTracks.length > 0) {
+        const startIndex = allMediaTracks.findIndex(t => t.url === url);
+        if (startIndex >= 0) {
+          setPlaylist(allMediaTracks, startIndex);
+        } else {
+          play(track);
+        }
+      } else {
+        play(track);
+      }
       onPlay?.();
     }
-  }, [isLoading, isThisTrack, globalIsPlaying, pause, resume, play, messageId, url, senderName, onPlay]);
+  }, [isLoading, isThisTrack, globalIsPlaying, pause, resume, play, setPlaylist, messageId, url, senderName, onPlay, allMediaTracks]);
 
   const handleWaveformClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const totalDuration = isThisTrack ? playingDuration : localDuration;

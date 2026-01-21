@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { MapContainer, TileLayer, Marker, Popup, useMap, Polyline, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -42,7 +42,11 @@ import {
   X,
   Layers,
   Menu,
-  MoreHorizontal
+  MoreHorizontal,
+  Route,
+  Footprints,
+  History,
+  Crosshair,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -56,6 +60,12 @@ import { Progress } from '@/components/ui/progress';
 import { StepTrackingCharts } from '@/components/map/StepTrackingCharts';
 import { TransportModePicker, TransportQuickBar, type TransportMode } from '@/components/map/TransportModePicker';
 import { MapQuickActions, MapQuickActionsGrid } from '@/components/map/MapQuickActions';
+import { DirectionsPanel } from '@/components/map/DirectionsPanel';
+import { DirectionsMobileSheet } from '@/components/map/DirectionsMobileSheet';
+import { LocationHistoryPanel } from '@/components/map/LocationHistoryPanel';
+import { LocationHistoryMobileSheet } from '@/components/map/LocationHistoryMobileSheet';
+import { useLocationTracking, DailyRoute } from '@/hooks/useLocationTracking';
+import { type RouteAlternative, formatDistance, formatDuration } from '@/hooks/useDirections';
 
 // Fix default marker icon
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -113,15 +123,69 @@ const destinationIcon = L.divIcon({
   iconAnchor: [16, 32],
 });
 
+// Frequent place markers
+const createPlaceIcon = (placeType: 'home' | 'work' | 'study' | 'other', name: string) => {
+  const config = {
+    home: { icon: '🏠', color: '#22c55e', bgColor: '#dcfce7' },
+    work: { icon: '💼', color: '#3b82f6', bgColor: '#dbeafe' },
+    study: { icon: '📚', color: '#f59e0b', bgColor: '#fef3c7' },
+    other: { icon: '📍', color: '#8b5cf6', bgColor: '#ede9fe' },
+  };
+  
+  const { icon, color, bgColor } = config[placeType] || config.other;
+  
+  return L.divIcon({
+    className: 'place-marker',
+    html: `
+      <div style="
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        transform: translateY(-50%);
+      ">
+        <div style="
+          width: 40px;
+          height: 40px;
+          background: ${bgColor};
+          border: 3px solid ${color};
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 20px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        ">${icon}</div>
+        <div style="
+          margin-top: 4px;
+          background: ${color};
+          color: white;
+          padding: 2px 8px;
+          border-radius: 10px;
+          font-size: 11px;
+          font-weight: 600;
+          white-space: nowrap;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        ">${name}</div>
+      </div>
+    `,
+    iconSize: [40, 60],
+    iconAnchor: [20, 30],
+  });
+};
+
 type MapLayer = 'standard' | 'satellite' | 'terrain';
 
 // Map event handler component
 function MapEventHandler({ 
   center, 
-  zoom 
+  zoom,
+  onMapClick,
+  isSelecting,
 }: { 
   center: [number, number]; 
   zoom: number;
+  onMapClick?: (lat: number, lng: number) => void;
+  isSelecting?: boolean;
 }) {
   const map = useMap();
   const hasSetInitialView = useRef(false);
@@ -138,12 +202,40 @@ function MapEventHandler({
       map.flyTo(center, zoom, { duration: 0.5 });
     }
   }, [center, map, zoom]);
+
+  // Map click handler for selecting locations
+  useEffect(() => {
+    if (!onMapClick) return;
+
+    const handleClick = (e: L.LeafletMouseEvent) => {
+      if (isSelecting) {
+        onMapClick(e.latlng.lat, e.latlng.lng);
+      }
+    };
+
+    map.on('click', handleClick);
+    return () => {
+      map.off('click', handleClick);
+    };
+  }, [map, onMapClick, isSelecting]);
+
+  // Change cursor when selecting
+  useEffect(() => {
+    const container = map.getContainer();
+    if (isSelecting) {
+      container.style.cursor = 'crosshair';
+    } else {
+      container.style.cursor = '';
+    }
+    return () => {
+      container.style.cursor = '';
+    };
+  }, [map, isSelecting]);
   
   return null;
 }
 
 export default function MapPage() {
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { user, profile } = useAuth();
   const {
@@ -184,9 +276,20 @@ export default function MapPage() {
   const [activeTab, setActiveTab] = useState<'nearby' | 'following' | 'activity'>('nearby');
   const [destination, setDestination] = useState<{ lat: number; lng: number; name: string } | null>(null);
   const [showDirections, setShowDirections] = useState(false);
+  const [showDirectionsPanel, setShowDirectionsPanel] = useState(false);
+  const [activeRoute, setActiveRoute] = useState<RouteAlternative | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
+  const [showLocationHistory, setShowLocationHistory] = useState(false);
+  const [viewingRoute, setViewingRoute] = useState<DailyRoute | null>(null);
+  
+  // Map selection mode for directions
+  const [mapSelectionMode, setMapSelectionMode] = useState<'origin' | 'destination' | null>(null);
+  const [selectedMapLocation, setSelectedMapLocation] = useState<{ lat: number; lng: number; name: string } | null>(null);
+  
+  // Location tracking hook
+  const { dailyRoutes, todayRoute, frequentPlaces } = useLocationTracking();
   
   // Parse destination from URL params
   useEffect(() => {
@@ -195,12 +298,14 @@ export default function MapPage() {
     const destName = searchParams.get('destName');
     
     if (destLat && destLng) {
-      setDestination({
+      const dest = {
         lat: parseFloat(destLat),
         lng: parseFloat(destLng),
         name: destName || 'Shared Location'
-      });
+      };
+      setDestination(dest);
       setShowDirections(true);
+      setShowDirectionsPanel(true);
     }
   }, [searchParams]);
   
@@ -376,22 +481,59 @@ export default function MapPage() {
     }
   }, [getCurrentPosition, startTracking]);
   
-  // Open directions in external app
-  const openDirections = useCallback((destLat: number, destLng: number, userName: string, mode: TransportMode = 'driving') => {
-    if (!currentLocation) {
-      toast.error('Joylashuv mavjud emas');
-      return;
+  // Open built-in directions
+  const openBuiltInDirections = useCallback((destLat: number, destLng: number, userName: string) => {
+    setDestination({ lat: destLat, lng: destLng, name: userName });
+    setShowDirectionsPanel(true);
+  }, []);
+
+  // Handle route calculated from directions panel
+  const handleRouteCalculated = useCallback((route: RouteAlternative | null) => {
+    setActiveRoute(route);
+    if (route && route.geometry.length > 0) {
+      // Center map on route
+      const midIndex = Math.floor(route.geometry.length / 2);
+      setMapCenter(route.geometry[midIndex]);
     }
+  }, []);
+
+  // Handle step selected in directions
+  const handleStepSelected = useCallback((location: [number, number]) => {
+    setMapCenter(location);
+    setZoom(17);
+  }, []);
+
+  // Handle map click for location selection
+  const handleMapClick = useCallback(async (lat: number, lng: number) => {
+    if (!mapSelectionMode) return;
     
-    let travelMode = 'driving';
-    if (mode === 'walking') travelMode = 'walking';
-    else if (mode === 'cycling') travelMode = 'bicycling';
-    else if (mode === 'transit' || mode === 'metro') travelMode = 'transit';
-    
-    const url = `https://www.google.com/maps/dir/?api=1&origin=${currentLocation.latitude},${currentLocation.longitude}&destination=${destLat},${destLng}&travelmode=${travelMode}`;
-    window.open(url, '_blank');
-    toast.success(`${userName} ga yo'nalish`);
-  }, [currentLocation]);
+    // Reverse geocode to get location name
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`,
+        { headers: { 'Accept-Language': 'uz,ru,en' } }
+      );
+      
+      let name = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      
+      if (response.ok) {
+        const data = await response.json();
+        const parts = [];
+        if (data.address?.road) parts.push(data.address.road);
+        if (data.address?.house_number) parts.push(data.address.house_number);
+        if (parts.length === 0 && data.display_name) {
+          name = data.display_name.split(',')[0];
+        } else if (parts.length > 0) {
+          name = parts.join(' ');
+        }
+      }
+      
+      setSelectedMapLocation({ lat, lng, name });
+      toast.success(`${mapSelectionMode === 'origin' ? 'Boshlang\'ich nuqta' : 'Manzil'} tanlandi: ${name}`);
+    } catch (error) {
+      setSelectedMapLocation({ lat, lng, name: `${lat.toFixed(5)}, ${lng.toFixed(5)}` });
+    }
+  }, [mapSelectionMode]);
   
   // Filter users by search
   const filteredNearby = nearbyUsers.filter((u) =>
@@ -449,7 +591,7 @@ export default function MapPage() {
                 <Settings className="h-5 w-5" />
               </Button>
             </SheetTrigger>
-            <SheetContent side="right" className="w-[300px] z-[1002]">
+            <SheetContent side="right" className="w-[300px] z-[9999]">
               <SheetHeader>
                 <SheetTitle>Sozlamalar</SheetTitle>
               </SheetHeader>
@@ -498,7 +640,7 @@ export default function MapPage() {
                 <Menu className="h-5 w-5" />
               </Button>
             </SheetTrigger>
-            <SheetContent side="bottom" className="h-[75vh] rounded-t-2xl z-[1002]">
+            <SheetContent side="bottom" className="h-[75vh] rounded-t-2xl z-[9999]">
               <SheetHeader className="pb-2">
                 <SheetTitle className="flex items-center gap-2">
                   <Users className="h-5 w-5" />
@@ -541,7 +683,7 @@ export default function MapPage() {
                                 {currentLocation && calculateDistance(currentLocation.latitude, currentLocation.longitude, u.latitude, u.longitude).toFixed(1)}km
                               </p>
                             </div>
-                            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); openDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi', transportMode); }}>
+                            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); openBuiltInDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi'); }}>
                               <Navigation className="h-4 w-4" />
                             </Button>
                           </div>
@@ -576,7 +718,7 @@ export default function MapPage() {
                                 {currentLocation && calculateDistance(currentLocation.latitude, currentLocation.longitude, u.latitude, u.longitude).toFixed(1)}km
                               </p>
                             </div>
-                            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); openDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi', transportMode); }}>
+                            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); openBuiltInDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi'); }}>
                               <Navigation className="h-4 w-4" />
                             </Button>
                           </div>
@@ -619,7 +761,7 @@ export default function MapPage() {
                 <Settings className="h-5 w-5" />
               </Button>
             </SheetTrigger>
-            <SheetContent>
+            <SheetContent className="z-[9999]">
               <SheetHeader>
                 <SheetTitle>Xarita sozlamalari</SheetTitle>
               </SheetHeader>
@@ -764,7 +906,7 @@ export default function MapPage() {
                           {currentLocation && calculateDistance(currentLocation.latitude, currentLocation.longitude, u.latitude, u.longitude).toFixed(1)}km uzoqlikda
                         </p>
                       </div>
-                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); openDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi', transportMode); }}>
+                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); openBuiltInDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi'); }}>
                         <Navigation className="h-4 w-4" />
                       </Button>
                     </div>
@@ -802,7 +944,7 @@ export default function MapPage() {
                           {currentLocation && calculateDistance(currentLocation.latitude, currentLocation.longitude, u.latitude, u.longitude).toFixed(1)}km uzoqlikda
                         </p>
                       </div>
-                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); openDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi', transportMode); }}>
+                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); openBuiltInDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi'); }}>
                         <Navigation className="h-4 w-4" />
                       </Button>
                     </div>
@@ -814,7 +956,19 @@ export default function MapPage() {
           
           <TabsContent value="activity" className="flex-1 overflow-hidden m-0">
             <ScrollArea className="h-full p-3">
-              <StepTrackingCharts stepsToday={stepsToday} stepHistory={stepHistory} dailyGoal={DAILY_STEP_GOAL} />
+              <LocationHistoryPanel
+                onNavigateToPlace={(lat, lng, name) => openBuiltInDirections(lat, lng, name)}
+                onViewRoute={(route) => {
+                  setViewingRoute(route);
+                  if (route.route_geometry && route.route_geometry.length > 0) {
+                    const midIndex = Math.floor(route.route_geometry.length / 2);
+                    setMapCenter(route.route_geometry[midIndex]);
+                  }
+                }}
+              />
+              <div className="mt-4">
+                <StepTrackingCharts stepsToday={stepsToday} stepHistory={stepHistory} dailyGoal={DAILY_STEP_GOAL} />
+              </div>
               <Card className="mt-4">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm flex items-center gap-2"><Battery className="h-4 w-4" />Batareya</CardTitle>
@@ -834,15 +988,15 @@ export default function MapPage() {
       <Button
         variant="secondary"
         size="icon"
-        className="hidden md:flex absolute top-1/2 -translate-y-1/2 z-[50] rounded-l-none"
+        className="hidden md:flex absolute top-1/2 -translate-y-1/2 z-[500] rounded-l-none"
         onClick={() => setSidebarOpen(!sidebarOpen)}
         style={{ left: sidebarOpen ? '320px' : '0' }}
       >
         {sidebarOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
       </Button>
       
-      {/* Map Container */}
-      <div className="flex-1 relative min-h-[400px] md:h-full">
+      {/* Map Container - Contains both map and directions panel */}
+      <div className="flex-1 relative min-h-[400px] md:h-full overflow-hidden">
         <MapContainer
           center={mapCenter}
           zoom={zoom}
@@ -853,7 +1007,12 @@ export default function MapPage() {
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             url={getTileUrl()}
           />
-          <MapEventHandler center={mapCenter} zoom={zoom} />
+          <MapEventHandler 
+            center={mapCenter} 
+            zoom={zoom} 
+            onMapClick={handleMapClick}
+            isSelecting={!!mapSelectionMode}
+          />
           
           {currentLocation && showNearby && (
             <Circle
@@ -890,7 +1049,7 @@ export default function MapPage() {
                   <p className="text-xs text-muted-foreground mb-2">
                     {currentLocation && calculateDistance(currentLocation.latitude, currentLocation.longitude, u.latitude, u.longitude).toFixed(1)}km uzoqlikda
                   </p>
-                  <Button size="sm" className="w-full" onClick={() => openDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi', transportMode)}>
+                  <Button size="sm" className="w-full" onClick={() => openBuiltInDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi')}>
                     <Navigation className="h-4 w-4 mr-1" /> Yo'nalish
                   </Button>
                 </div>
@@ -910,7 +1069,7 @@ export default function MapPage() {
                   <p className="text-xs text-muted-foreground mb-2">
                     {currentLocation && calculateDistance(currentLocation.latitude, currentLocation.longitude, u.latitude, u.longitude).toFixed(1)}km uzoqlikda
                   </p>
-                  <Button size="sm" className="w-full" onClick={() => openDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi', transportMode)}>
+                  <Button size="sm" className="w-full" onClick={() => openBuiltInDirections(u.latitude, u.longitude, u.profile?.display_name || 'Foydalanuvchi')}>
                     <Navigation className="h-4 w-4 mr-1" /> Yo'nalish
                   </Button>
                 </div>
@@ -928,7 +1087,7 @@ export default function MapPage() {
                     <p className="text-xs text-muted-foreground mb-2">{calculateDistance(currentLocation.latitude, currentLocation.longitude, destination.lat, destination.lng).toFixed(1)}km uzoqlikda</p>
                   )}
                   <div className="flex gap-1">
-                    <Button size="sm" className="flex-1" onClick={() => openDirections(destination.lat, destination.lng, destination.name, transportMode)}>
+                    <Button size="sm" className="flex-1" onClick={() => setShowDirectionsPanel(true)}>
                       <Navigation className="h-4 w-4 mr-1" /> Borish
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => { setDestination(null); setShowDirections(false); }}>
@@ -940,14 +1099,85 @@ export default function MapPage() {
             </Marker>
           )}
           
-          {currentLocation && destination && showDirections && (
+          {/* Frequent Places Markers */}
+          {frequentPlaces.map((place) => (
+            <Marker 
+              key={place.id} 
+              position={[place.latitude, place.longitude]} 
+              icon={createPlaceIcon(place.place_type, place.name)}
+            >
+              <Popup>
+                <div className="text-center min-w-[150px]">
+                  <div className="text-3xl mb-2">
+                    {place.place_type === 'home' ? '🏠' : place.place_type === 'work' ? '💼' : place.place_type === 'study' ? '📚' : '📍'}
+                  </div>
+                  <p className="font-medium">{place.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {place.visit_count} marta tashrif • O'rtacha {place.average_stay_minutes} daqiqa
+                  </p>
+                  {currentLocation && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {(calculateDistance(currentLocation.latitude, currentLocation.longitude, place.latitude, place.longitude) / 1000).toFixed(1)} km uzoqlikda
+                    </p>
+                  )}
+                  <Button 
+                    size="sm" 
+                    className="w-full mt-2" 
+                    onClick={() => openBuiltInDirections(place.latitude, place.longitude, place.name)}
+                  >
+                    <Navigation className="h-4 w-4 mr-1" /> Borish
+                  </Button>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
+          
+          {/* Active Route Polyline */}
+          {activeRoute && activeRoute.geometry.length > 0 && (
+            <Polyline 
+              positions={activeRoute.geometry} 
+              pathOptions={{ 
+                color: '#3b82f6', 
+                weight: 5, 
+                opacity: 0.8,
+              }} 
+            />
+          )}
+          
+          {/* Today's Route Polyline - Show user's path today */}
+          {todayRoute && todayRoute.route_geometry && todayRoute.route_geometry.length > 1 && !viewingRoute && (
+            <Polyline 
+              positions={todayRoute.route_geometry} 
+              pathOptions={{ 
+                color: 'hsl(var(--primary))', 
+                weight: 3, 
+                opacity: 0.6,
+                dashArray: '8, 4',
+              }} 
+            />
+          )}
+          
+          {/* Viewing Historical Route Polyline */}
+          {viewingRoute && viewingRoute.route_geometry && viewingRoute.route_geometry.length > 1 && (
+            <Polyline 
+              positions={viewingRoute.route_geometry} 
+              pathOptions={{ 
+                color: 'hsl(142, 76%, 36%)', 
+                weight: 4, 
+                opacity: 0.8,
+              }} 
+            />
+          )}
+          
+          {/* Fallback straight line if no route but destination exists */}
+          {currentLocation && destination && showDirections && !activeRoute && (
             <Polyline positions={[[currentLocation.latitude, currentLocation.longitude], [destination.lat, destination.lng]]} pathOptions={{ color: '#3b82f6', weight: 4, dashArray: '10, 10' }} />
           )}
         </MapContainer>
         
         {/* Location permission prompt overlay */}
         {showPermissionPrompt && (
-          <div className="absolute inset-0 z-[60] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="absolute inset-0 z-[1000] bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
             <div className="text-center p-6 bg-card rounded-xl shadow-lg border max-w-sm w-full">
               <div className="p-4 rounded-full bg-primary/10 w-fit mx-auto mb-4">
                 <MapPin className="h-10 w-10 text-primary" />
@@ -966,7 +1196,7 @@ export default function MapPage() {
         
         {/* Destination Bar */}
         {destination && (
-          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[50] bg-background/95 backdrop-blur-lg rounded-xl shadow-lg border p-3 flex items-center gap-3 max-w-[90%]">
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[500] bg-background/95 backdrop-blur-lg rounded-xl shadow-lg border p-3 flex items-center gap-3 max-w-[90%]">
             <MapPin className="h-5 w-5 text-destructive shrink-0" />
             <div className="min-w-0">
               <p className="font-medium truncate">{destination.name}</p>
@@ -975,8 +1205,8 @@ export default function MapPage() {
               )}
             </div>
             <TransportQuickBar selected={transportMode} onSelect={setTransportMode} />
-            <Button size="sm" onClick={() => openDirections(destination.lat, destination.lng, destination.name, transportMode)}>
-              <ExternalLink className="h-4 w-4 mr-1" /> Ochish
+            <Button size="sm" onClick={() => setShowDirectionsPanel(true)}>
+              <Route className="h-4 w-4 mr-1" /> Yo'nalish
             </Button>
             <Button size="sm" variant="ghost" onClick={() => { setDestination(null); setShowDirections(false); }}>
               <X className="h-4 w-4" />
@@ -984,21 +1214,79 @@ export default function MapPage() {
           </div>
         )}
         
+        {/* Viewing Route Banner */}
+        {viewingRoute && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[500] bg-background/95 backdrop-blur-lg rounded-xl shadow-lg border p-3 flex items-center gap-3 max-w-[90%]">
+            <Footprints className="h-5 w-5 text-success shrink-0" />
+            <div className="min-w-0">
+              <p className="font-medium truncate">{viewingRoute.route_date} yo'li</p>
+              <p className="text-xs text-muted-foreground">{viewingRoute.total_distance_km?.toFixed(1) || 0} km bosib o'tilgan</p>
+            </div>
+            <Button size="sm" variant="ghost" onClick={() => setViewingRoute(null)}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
+        
+        {/* Map Selection Mode Indicator */}
+        {mapSelectionMode && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[600] animate-pulse">
+            <div className={cn(
+              "px-4 py-2 rounded-full shadow-lg border-2 flex items-center gap-2 font-medium text-sm",
+              mapSelectionMode === 'origin' 
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-destructive text-destructive-foreground border-destructive"
+            )}>
+              <Crosshair className="h-4 w-4" />
+              {mapSelectionMode === 'origin' 
+                ? "Boshlang'ich nuqtani xaritadan tanlang"
+                : "Manzilni xaritadan tanlang"
+              }
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 ml-1 hover:bg-white/20"
+                onClick={() => setMapSelectionMode(null)}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
+        
         {/* Map Controls */}
-        <div className="absolute bottom-20 md:bottom-4 right-4 z-[50] flex flex-col gap-1">
-          <Button variant="secondary" size="icon" className="shadow-lg" onClick={centerOnLocation}>
+        <div className="absolute bottom-20 md:bottom-4 right-4 z-[500] flex flex-col gap-1">
+          <Button 
+            variant={showLocationHistory ? "default" : "secondary"} 
+            size="icon" 
+            className="shadow-lg"
+            onClick={() => setShowLocationHistory(!showLocationHistory)}
+            title="Joylashuv tarixi"
+          >
+            <History className="h-4 w-4" />
+          </Button>
+          <Button 
+            variant={showDirectionsPanel ? "default" : "secondary"} 
+            size="icon" 
+            className="shadow-lg"
+            onClick={() => setShowDirectionsPanel(!showDirectionsPanel)}
+            title="Yo'nalishlar"
+          >
+            <Route className="h-4 w-4" />
+          </Button>
+          <Button variant="secondary" size="icon" className="shadow-lg" onClick={centerOnLocation} title="Joriy joylashuv">
             <Locate className="h-4 w-4" />
           </Button>
-          <Button variant="secondary" size="icon" className="shadow-lg" onClick={() => setZoom(Math.min(zoom + 1, 18))}>
+          <Button variant="secondary" size="icon" className="shadow-lg" onClick={() => setZoom(Math.min(zoom + 1, 18))} title="Kattalashtirish">
             <ZoomIn className="h-4 w-4" />
           </Button>
-          <Button variant="secondary" size="icon" className="shadow-lg" onClick={() => setZoom(Math.max(zoom - 1, 3))}>
+          <Button variant="secondary" size="icon" className="shadow-lg" onClick={() => setZoom(Math.max(zoom - 1, 3))} title="Kichiklashtirish">
             <ZoomOut className="h-4 w-4" />
           </Button>
         </div>
         
         {/* Layer switcher */}
-        <div className="absolute top-2 right-2 z-[50]">
+        <div className="absolute top-2 right-2 z-[500]">
           <Button variant="secondary" size="icon" className="shadow-lg" onClick={() => {
             const layers: MapLayer[] = ['standard', 'satellite', 'terrain'];
             const currentIndex = layers.indexOf(mapLayer);
@@ -1008,6 +1296,73 @@ export default function MapPage() {
           </Button>
         </div>
       </div>
+
+      {/* Desktop/Tablet Directions Panel - Isolated from map events */}
+      {showDirectionsPanel && (
+        <div 
+          className="hidden md:block fixed top-0 bottom-0 z-[9999] pointer-events-auto"
+          style={{ left: sidebarOpen ? '320px' : '0' }}
+        >
+          <DirectionsPanel
+            currentLocation={currentLocation}
+            initialDestination={destination}
+            transportMode={transportMode}
+            onTransportModeChange={setTransportMode}
+            onRouteCalculated={handleRouteCalculated}
+            onStepSelected={handleStepSelected}
+            onClose={() => {
+              setShowDirectionsPanel(false);
+              setActiveRoute(null);
+              setMapSelectionMode(null);
+            }}
+            className="h-full w-[380px]"
+            mapSelectionMode={mapSelectionMode}
+            onMapSelectionModeChange={setMapSelectionMode}
+            selectedMapLocation={selectedMapLocation}
+            onClearSelectedMapLocation={() => setSelectedMapLocation(null)}
+          />
+        </div>
+      )}
+
+      {/* Mobile Location History Sheet */}
+      <LocationHistoryMobileSheet
+        open={showLocationHistory}
+        onOpenChange={setShowLocationHistory}
+        onNavigateToPlace={(lat, lng, name) => {
+          openBuiltInDirections(lat, lng, name);
+          setShowLocationHistory(false);
+        }}
+        onViewRoute={(route) => {
+          setViewingRoute(route);
+          setShowLocationHistory(false);
+          if (route.route_geometry && route.route_geometry.length > 0) {
+            const midIndex = Math.floor(route.route_geometry.length / 2);
+            setMapCenter(route.route_geometry[midIndex]);
+          }
+        }}
+      />
+
+      {/* Mobile Directions Sheet - Only renders on mobile via internal class */}
+      <DirectionsMobileSheet
+        open={showDirectionsPanel}
+        onOpenChange={(open) => {
+          setShowDirectionsPanel(open);
+          if (!open) {
+            setActiveRoute(null);
+            setMapSelectionMode(null);
+          }
+        }}
+        currentLocation={currentLocation}
+        initialDestination={destination}
+        transportMode={transportMode}
+        onTransportModeChange={setTransportMode}
+        onRouteCalculated={handleRouteCalculated}
+        onStepSelected={handleStepSelected}
+        mapSelectionMode={mapSelectionMode}
+        onMapSelectionModeChange={setMapSelectionMode}
+        selectedMapLocation={selectedMapLocation}
+        onClearSelectedMapLocation={() => setSelectedMapLocation(null)}
+      />
 
       {/* Global styles for marker animation */}
       <style>{`

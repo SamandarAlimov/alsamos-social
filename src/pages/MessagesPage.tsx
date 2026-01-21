@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
 import {
@@ -42,7 +42,7 @@ import { MessageSearch } from '@/components/messages/MessageSearch';
 import { IncomingCallDialog } from '@/components/messages/IncomingCallDialog';
 import { PinnedMessagesBar } from '@/components/messages/PinnedMessagesBar';
 import { EditMessageDialog } from '@/components/messages/EditMessageDialog';
-import { DeleteMessageDialog } from '@/components/messages/DeleteMessageDialog';
+import { DeleteMessageDialog, DeleteScope } from '@/components/messages/DeleteMessageDialog';
 import { TypingIndicator } from '@/components/messages/TypingIndicator';
 import { GroupMemberManagement } from '@/components/messages/GroupMemberManagement';
 import { ScheduledMessagesSheet } from '@/components/messages/ScheduledMessagesSheet';
@@ -109,6 +109,7 @@ export default function MessagesPage() {
     sendMessage, 
     editMessage,
     deleteMessage,
+    deleteMessageForMe,
     setTyping 
   } = useMessages(selectedConversation?.id || null);
 
@@ -381,9 +382,13 @@ export default function MessagesPage() {
     }
   };
 
-  const handleDeleteConfirm = async () => {
+  const handleDeleteConfirm = async (scope: DeleteScope) => {
     if (deletingMessage) {
-      await deleteMessage(deletingMessage.id);
+      if (scope === 'for_everyone') {
+        await deleteMessage(deletingMessage.id);
+      } else {
+        await deleteMessageForMe(deletingMessage.id);
+      }
       setDeletingMessage(null);
     }
   };
@@ -733,12 +738,15 @@ export default function MessagesPage() {
     }
   };
 
-  // Group messages by date
+  // Group messages by date (filter out deleted messages completely)
   const groupMessagesByDate = (msgs: Message[]) => {
     const groups: { date: string; messages: Message[] }[] = [];
     let currentDate = '';
     
-    msgs.forEach(msg => {
+    // Filter out deleted messages - they should not appear at all
+    const activeMessages = msgs.filter(msg => !msg.is_deleted);
+    
+    activeMessages.forEach(msg => {
       const msgDate = new Date(msg.created_at).toDateString();
       if (msgDate !== currentDate) {
         currentDate = msgDate;
@@ -753,6 +761,24 @@ export default function MessagesPage() {
 
   const messageGroups = groupMessagesByDate(messages);
 
+  // Build media tracks playlist for sequential playback (Telegram-style)
+  const mediaTracksForPlaylist = useMemo(() => {
+    return messages
+      .filter(msg => 
+        !msg.is_deleted && 
+        msg.media_url && 
+        (msg.media_type === 'audio' || msg.media_type === 'video')
+      )
+      .map(msg => ({
+        id: msg.id,
+        url: msg.media_url!,
+        name: msg.media_type === 'audio' ? 'Voice message' : 'Video message',
+        artist: msg.sender?.display_name || msg.sender?.username || 'Unknown',
+        title: msg.media_type === 'audio' ? 'Voice message' : 'Video message',
+        senderName: msg.sender?.display_name || msg.sender?.username,
+        type: msg.media_type as 'audio' | 'video',
+      }));
+  }, [messages]);
   // Swipe to close state
   const [chatSwipeOffset, setChatSwipeOffset] = useState(0);
   const [isChatSwiping, setIsChatSwiping] = useState(false);
@@ -1099,6 +1125,7 @@ export default function MessagesPage() {
                                 isSelectionMode={isSelectionMode}
                                 showAvatar={showAvatar}
                                 showSender={selectedConversation.type === 'group' && showAvatar}
+                                allMediaTracks={mediaTracksForPlaylist}
                               />
                             </div>
                           );
@@ -1184,6 +1211,7 @@ export default function MessagesPage() {
         onOpenChange={(open) => !open && setDeletingMessage(null)}
         onConfirm={handleDeleteConfirm}
         messagePreview={deletingMessage?.content || undefined}
+        isMine={deletingMessage?.sender_id === user?.id}
       />
 
       {selectedConversation && selectedConversation.type === 'group' && (

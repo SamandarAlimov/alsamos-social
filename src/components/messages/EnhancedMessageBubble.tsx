@@ -61,6 +61,8 @@ interface ReactionGroup {
   hasReacted: boolean;
 }
 
+import { MediaTrack } from '@/contexts/AudioPlayerContext';
+
 interface EnhancedMessageBubbleProps {
   message: Message;
   isMine: boolean;
@@ -77,6 +79,8 @@ interface EnhancedMessageBubbleProps {
   isSelectionMode?: boolean;
   showAvatar?: boolean;
   showSender?: boolean;
+  /** All media tracks in conversation for sequential playback */
+  allMediaTracks?: MediaTrack[];
 }
 
 export function EnhancedMessageBubble({
@@ -95,6 +99,7 @@ export function EnhancedMessageBubble({
   isSelectionMode = false,
   showAvatar = true,
   showSender = false,
+  allMediaTracks = [],
 }: EnhancedMessageBubbleProps) {
   const { user } = useAuth();
   const { settings } = useUserSettings();
@@ -386,13 +391,52 @@ export function EnhancedMessageBubble({
 
   const isReadyToReply = swipeOffset >= swipeThreshold;
 
-  // Render call history message as a centered system message
+  // Render call history message as a centered system message with context menu
   if (isCallHistoryMessage && callHistoryData) {
+    const callIsMine = callHistoryData.caller_id === user?.id;
     return (
-      <CallHistoryMessage 
-        callData={callHistoryData} 
-        isMine={callHistoryData.caller_id === user?.id} 
-      />
+      <MessageContextMenu
+        isMine={callIsMine}
+        onReply={() => onReply?.(message)}
+        onForward={() => onForward?.(message)}
+        onDelete={callIsMine ? () => onDelete?.(message.id) : undefined}
+        onSelect={onLongPress ? () => onLongPress(message.id) : undefined}
+        isPinned={isPinned}
+        onPin={() => onPin?.(message.id)}
+        sentAt={message.created_at}
+      >
+        <div 
+          className={cn(
+            "relative",
+            isSelected && "bg-primary/10 rounded-lg"
+          )}
+          onClick={() => {
+            if (isSelectionMode && onSelect) {
+              onSelect(message.id);
+              lightTap();
+            }
+          }}
+          onTouchStart={handleLongPressStart}
+          onTouchEnd={handleLongPressEnd}
+          onMouseDown={handleLongPressStart}
+          onMouseUp={handleLongPressEnd}
+          onMouseLeave={handleLongPressEnd}
+        >
+          {isSelectionMode && (
+            <div className="absolute left-2 top-1/2 -translate-y-1/2 z-10">
+              {isSelected ? (
+                <CheckSquare className="h-5 w-5 text-primary" />
+              ) : (
+                <Square className="h-5 w-5 text-muted-foreground" />
+              )}
+            </div>
+          )}
+          <CallHistoryMessage 
+            callData={callHistoryData} 
+            isMine={callIsMine} 
+          />
+        </div>
+      </MessageContextMenu>
     );
   }
 
@@ -578,7 +622,10 @@ export function EnhancedMessageBubble({
                     <VoiceMessagePlayer 
                       url={message.media_url!} 
                       isMine={isMine} 
-                      autoPlay={settings?.autoplay_voice_messages ?? true}
+                      autoPlay={false}
+                      messageId={message.id}
+                      senderName={message.sender?.display_name || message.sender?.username || undefined}
+                      allMediaTracks={allMediaTracks}
                     />
                   ) : (
                     <>
@@ -591,13 +638,7 @@ export function EnhancedMessageBubble({
                             url={message.media_url} 
                             type={message.media_type as 'image' | 'video' | 'audio' | 'document'}
                             isMine={isMine}
-                            autoPlay={
-                              message.media_type === 'video' 
-                                ? (settings?.autoplay_video_messages ?? true)
-                                : message.media_type === 'audio'
-                                ? (settings?.autoplay_voice_messages ?? true)
-                                : false
-                            }
+                            autoPlay={false}
                           />
                         </div>
                       )}

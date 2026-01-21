@@ -3,15 +3,31 @@ import { Button } from '@/components/ui/button';
 import { Play, Pause, Volume2, VolumeX, Maximize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion } from 'framer-motion';
+import { MediaTrack } from '@/contexts/AudioPlayerContext';
 
 interface VideoMessagePlayerProps {
   url: string;
   isMine?: boolean;
   className?: string;
   autoPlay?: boolean;
+  messageId?: string;
+  senderName?: string;
+  /** All media messages in the conversation for sequential playback */
+  allMediaTracks?: MediaTrack[];
+  /** Callback when video ends to trigger next playback */
+  onEnded?: () => void;
 }
 
-export function VideoMessagePlayer({ url, isMine, className, autoPlay = false }: VideoMessagePlayerProps) {
+export function VideoMessagePlayer({ 
+  url, 
+  isMine, 
+  className, 
+  autoPlay = false,
+  messageId,
+  senderName,
+  allMediaTracks = [],
+  onEnded
+}: VideoMessagePlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -23,33 +39,23 @@ export function VideoMessagePlayer({ url, isMine, className, autoPlay = false }:
   const [isVisible, setIsVisible] = useState(false);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Intersection Observer for autoplay
+  // Visibility tracking (no autoplay - Telegram behavior)
   useEffect(() => {
-    const video = videoRef.current;
     const container = containerRef.current;
-    if (!video || !container) return;
+    if (!container) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
         const [entry] = entries;
         setIsVisible(entry.isIntersecting);
-        
-        if (autoPlay) {
-          if (entry.isIntersecting && entry.intersectionRatio > 0.5) {
-            video.play().catch(() => {});
-            setIsPlaying(true);
-          } else {
-            video.pause();
-            setIsPlaying(false);
-          }
-        }
+        // No autoplay on scroll - user must explicitly click to play
       },
       { threshold: [0, 0.5, 1] }
     );
 
     observer.observe(container);
     return () => observer.disconnect();
-  }, [autoPlay]);
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -67,6 +73,8 @@ export function VideoMessagePlayer({ url, isMine, className, autoPlay = false }:
     const handleEnded = () => {
       setIsPlaying(false);
       video.currentTime = 0;
+      // Trigger sequential playback callback
+      onEnded?.();
     };
 
     const handleCanPlay = () => {
@@ -91,7 +99,7 @@ export function VideoMessagePlayer({ url, isMine, className, autoPlay = false }:
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
     };
-  }, []);
+  }, [onEnded]);
 
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;

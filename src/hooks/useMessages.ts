@@ -542,6 +542,7 @@ export function useMessages(conversationId: string | null) {
     setIsLoading(true);
 
     try {
+      // First fetch all messages
       const { data, error } = await supabase
         .from('messages')
         .select(`
@@ -554,11 +555,26 @@ export function useMessages(conversationId: string | null) {
           )
         `)
         .eq('conversation_id', conversationId)
+        .eq('is_deleted', false)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
+
+      // Fetch messages deleted for this user only
+      let deletedForMeIds: Set<string> = new Set();
+      if (user) {
+        const { data: deletions } = await supabase
+          .from('message_deletions')
+          .select('message_id')
+          .eq('user_id', user.id);
+        
+        deletedForMeIds = new Set((deletions || []).map(d => d.message_id));
+      }
       
-      const messagesWithStatus = (data || []).map(m => ({
+      // Filter out messages deleted for this user
+      const filteredMessages = (data || []).filter(m => !deletedForMeIds.has(m.id));
+      
+      const messagesWithStatus = filteredMessages.map(m => ({
         ...m,
         status: 'delivered' as const,
       }));
@@ -566,11 +582,11 @@ export function useMessages(conversationId: string | null) {
       setMessages(messagesWithStatus as Message[]);
       
       // Track all fetched message IDs
-      processedMessageIds.current = new Set(data?.map(m => m.id) || []);
+      processedMessageIds.current = new Set(filteredMessages.map(m => m.id));
 
       // Mark messages as read
-      if (user && data) {
-        const unreadMessageIds = data
+      if (user && filteredMessages.length > 0) {
+        const unreadMessageIds = filteredMessages
           .filter(m => m.sender_id !== user.id)
           .map(m => m.id);
 
@@ -707,6 +723,7 @@ export function useMessages(conversationId: string | null) {
     }
   }, [toast]);
 
+  // Delete message for everyone (marks as deleted in messages table)
   const deleteMessage = useCallback(async (messageId: string) => {
     try {
       const { error } = await supabase
@@ -716,9 +733,8 @@ export function useMessages(conversationId: string | null) {
 
       if (error) throw error;
 
-      setMessages(prev => prev.map(m =>
-        m.id === messageId ? { ...m, is_deleted: true, content: null } : m
-      ));
+      // Remove the message completely from state (not just mark as deleted)
+      setMessages(prev => prev.filter(m => m.id !== messageId));
     } catch (error: any) {
       console.error('Error deleting message:', error);
       toast({
@@ -728,6 +744,32 @@ export function useMessages(conversationId: string | null) {
       });
     }
   }, [toast]);
+
+  // Delete message for current user only (adds to message_deletions table)
+  const deleteMessageForMe = useCallback(async (messageId: string) => {
+    if (!user) return;
+    
+    try {
+      const { error } = await supabase
+        .from('message_deletions')
+        .insert({
+          message_id: messageId,
+          user_id: user.id,
+        });
+
+      if (error) throw error;
+
+      // Remove the message from local state for this user only
+      setMessages(prev => prev.filter(m => m.id !== messageId));
+    } catch (error: any) {
+      console.error('Error deleting message for me:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to delete message',
+        variant: 'destructive',
+      });
+    }
+  }, [user, toast]);
 
   // Set typing indicator (reliable without requiring unique constraints)
   const setTyping = useCallback(async (isTyping: boolean) => {
@@ -850,11 +892,18 @@ export function useMessages(conversationId: string | null) {
         },
         (payload) => {
           console.log('Realtime UPDATE received:', payload.new.id);
-          setMessages(prev => prev.map(m =>
-            m.id === payload.new.id
-              ? { ...m, ...payload.new }
-              : m
-          ));
+          const updatedMessage = payload.new as any;
+          
+          // If message was deleted, remove it from state completely
+          if (updatedMessage.is_deleted) {
+            setMessages(prev => prev.filter(m => m.id !== updatedMessage.id));
+          } else {
+            setMessages(prev => prev.map(m =>
+              m.id === updatedMessage.id
+                ? { ...m, ...updatedMessage }
+                : m
+            ));
+          }
         }
       )
       .subscribe((status) => {
@@ -937,6 +986,7 @@ export function useMessages(conversationId: string | null) {
     sendMessage,
     editMessage,
     deleteMessage,
+    deleteMessageForMe,
     setTyping,
     refresh: fetchMessages,
   };
