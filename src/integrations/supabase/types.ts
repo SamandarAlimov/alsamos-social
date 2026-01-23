@@ -1554,6 +1554,8 @@ export type Database = {
         Row: {
           avatar_url: string | null
           bio: string | null
+          birth_date: string | null
+          country: string | null
           cover_url: string | null
           created_at: string | null
           display_name: string | null
@@ -1572,6 +1574,8 @@ export type Database = {
         Insert: {
           avatar_url?: string | null
           bio?: string | null
+          birth_date?: string | null
+          country?: string | null
           cover_url?: string | null
           created_at?: string | null
           display_name?: string | null
@@ -1590,6 +1594,8 @@ export type Database = {
         Update: {
           avatar_url?: string | null
           bio?: string | null
+          birth_date?: string | null
+          country?: string | null
           cover_url?: string | null
           created_at?: string | null
           display_name?: string | null
@@ -2313,6 +2319,13 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      get_admin_age_stats: { Args: never; Returns: Json }
+      get_admin_country_stats: { Args: never; Returns: Json }
+      get_admin_dau_trend: { Args: never; Returns: Json }
+      get_admin_hourly_activity: { Args: never; Returns: Json }
+      get_admin_page_stats: { Args: never; Returns: Json }
+      get_admin_platform_stats: { Args: never; Returns: Json }
+      get_admin_weekly_pattern: { Args: never; Returns: Json }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Camera, CameraOff, Mic, MicOff, SwitchCamera, Users, Clock, Radio, MessageCircle, Loader2, Wifi, Monitor, MonitorOff } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -62,7 +63,7 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
   // Use WebRTC viewer count if connected, otherwise DB count
   const viewerCount = isWebRTCConnected ? webrtcViewerCount : dbViewerCount;
 
-  // Initialize camera on mount
+  // Initialize camera on mount with mobile-compatible constraints
   const initializeCamera = useCallback(async () => {
     try {
       setIsInitializing(true);
@@ -72,13 +73,35 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
 
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
+      // Mobile-compatible video constraints
+      // Avoid using 'ideal' constraints which can fail on some mobile devices
+      const constraints: MediaStreamConstraints = {
         video: { 
-          facingMode: facingMode, 
-          width: { ideal: 1280 }, 
-          height: { ideal: 720 } 
+          facingMode: facingMode,
+          // Use 'max' instead of 'ideal' for better mobile compatibility
+          width: { max: 1280, min: 320 }, 
+          height: { max: 720, min: 240 },
+          // Request reasonable frame rate
+          frameRate: { max: 30, ideal: 24 },
         },
-        audio: true,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      };
+
+      console.log('[Broadcast] Requesting media with constraints:', JSON.stringify(constraints));
+      
+      const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      // Log track info for debugging
+      mediaStream.getTracks().forEach(track => {
+        console.log(`[Broadcast] Got ${track.kind} track:`, track.label, 'enabled:', track.enabled, 'readyState:', track.readyState);
+        if (track.kind === 'video') {
+          const settings = track.getSettings();
+          console.log('[Broadcast] Video settings:', settings.width, 'x', settings.height, '@', settings.frameRate, 'fps');
+        }
       });
 
       localStreamRef.current = mediaStream;
@@ -91,8 +114,25 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
       setIsInitializing(false);
     } catch (error: any) {
       console.error('Error initializing camera:', error);
-      toast.error('Failed to access camera: ' + error.message);
-      setIsInitializing(false);
+      
+      // Try fallback with minimal constraints for older mobile devices
+      try {
+        console.log('[Broadcast] Trying fallback constraints');
+        const fallbackStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facingMode },
+          audio: true,
+        });
+        
+        localStreamRef.current = fallbackStream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = fallbackStream;
+        }
+        setIsInitializing(false);
+      } catch (fallbackError: any) {
+        console.error('Fallback also failed:', fallbackError);
+        toast.error('Failed to access camera: ' + fallbackError.message);
+        setIsInitializing(false);
+      }
     }
   }, [facingMode]);
 
@@ -294,13 +334,19 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
 
+      // Mobile-compatible constraints
       const newStream = await navigator.mediaDevices.getUserMedia({
         video: { 
           facingMode: newFacingMode, 
-          width: { ideal: 1280 }, 
-          height: { ideal: 720 } 
+          width: { max: 1280, min: 320 }, 
+          height: { max: 720, min: 240 },
+          frameRate: { max: 30, ideal: 24 },
         },
-        audio: true,
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
       
       localStreamRef.current = newStream;
@@ -395,85 +441,84 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
     }
   };
 
-  // Pre-live screen
-  if (!isLive) {
-    return (
-      <div className="fixed inset-0 z-50 bg-black flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 safe-area-top">
-          <button onClick={handleClose} className="text-white">
-            <X className="h-6 w-6" />
-          </button>
-          <span className="text-white font-semibold">New Live Video</span>
-          <div className="w-6" />
-        </div>
+  // Pre-live screen content
+  const preLiveContent = (
+    <div className="fixed inset-0 z-[9999] bg-black flex flex-col" style={{ height: '100dvh' }}>
+      {/* Header */}
+      <div className="flex items-center justify-between p-4 safe-area-top">
+        <button onClick={handleClose} className="text-white">
+          <X className="h-6 w-6" />
+        </button>
+        <span className="text-white font-semibold">New Live Video</span>
+        <div className="w-6" />
+      </div>
 
-        {/* Preview */}
-        <div className="flex-1 relative">
-          {isInitializing ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-black">
-              <Loader2 className="h-8 w-8 animate-spin text-white" />
-            </div>
-          ) : (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
-              style={{ transform: facingMode === 'user' ? 'scaleX(-1)' : 'none' }}
-            />
-          )}
-          
-          {/* Overlay */}
-          <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/80" />
-          
-          {/* Camera switch button */}
-          <button
-            onClick={switchCamera}
-            className="absolute top-4 right-4 h-10 w-10 rounded-full bg-white/20 flex items-center justify-center"
-          >
-            <SwitchCamera className="h-5 w-5 text-white" />
-          </button>
-          
-          {/* Title input */}
-          <div className="absolute bottom-0 left-0 right-0 p-4 safe-area-bottom">
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Add a title for your live video..."
-              className="bg-white/10 border-white/20 text-white placeholder:text-white/50 mb-4"
-            />
-            
-            <Button
-              onClick={handleStartLive}
-              disabled={isStarting || isInitializing}
-              className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-6"
-            >
-              {isStarting ? (
-                <Loader2 className="h-5 w-5 animate-spin mr-2" />
-              ) : (
-                <Radio className="h-5 w-5 mr-2" />
-              )}
-              Go Live
-            </Button>
+      {/* Preview */}
+      <div className="flex-1 relative">
+        {isInitializing ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-black">
+            <Loader2 className="h-8 w-8 animate-spin text-white" />
           </div>
+        ) : (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="absolute inset-0 w-full h-full object-cover mirror"
+          />
+        )}
+        
+        {/* Overlay */}
+        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/80" />
+        
+        {/* Camera switch button */}
+        <button
+          onClick={switchCamera}
+          className="absolute top-4 right-4 h-10 w-10 rounded-full bg-white/20 flex items-center justify-center"
+        >
+          <SwitchCamera className="h-5 w-5 text-white" />
+        </button>
+        
+        {/* Title input */}
+        <div className="absolute bottom-0 left-0 right-0 p-4 safe-area-bottom">
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Add a title for your live video..."
+            className="bg-white/10 border-white/20 text-white placeholder:text-white/50 mb-4"
+          />
+          
+          <Button
+            onClick={handleStartLive}
+            disabled={isStarting || isInitializing}
+            className="w-full bg-destructive hover:bg-destructive/90 text-white font-bold py-6"
+          >
+            {isStarting ? (
+              <Loader2 className="h-5 w-5 animate-spin mr-2" />
+            ) : (
+              <Radio className="h-5 w-5 mr-2" />
+            )}
+            Go Live
+          </Button>
         </div>
       </div>
-    );
-  }
+    </div>
+  );
 
-  // Live broadcast screen
-  return (
-    <div className="fixed inset-0 z-50 bg-black flex flex-col">
-      {/* Video */}
+  // Live broadcast screen content
+  const liveContent = (
+    <div className="fixed inset-0 z-[9999] bg-black flex flex-col" style={{ height: '100dvh' }}>
+      {/* Video - mirrored for front camera */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{ transform: facingMode === 'user' ? 'scaleX(-1)' : 'none' }}
+        className={cn(
+          "absolute inset-0 w-full h-full object-cover",
+          facingMode === 'user' && !isScreenSharing && "mirror"
+        )}
       />
 
       {/* Gradient overlays */}
@@ -483,7 +528,7 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
       <div className="relative z-10 p-4 safe-area-top">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Avatar className="h-10 w-10 border-2 border-red-500">
+            <Avatar className="h-10 w-10 border-2 border-destructive">
               <AvatarImage src={profile?.avatar_url || ''} />
               <AvatarFallback>
                 {profile?.display_name?.[0] || 'U'}
@@ -494,9 +539,15 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
                 <span className="text-white font-semibold text-sm">
                   {profile?.display_name || profile?.username}
                 </span>
-                <span className="bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded animate-pulse">
+                <span className="bg-destructive text-white text-[10px] font-bold px-1.5 py-0.5 rounded animate-pulse">
                   LIVE
                 </span>
+                {isWebRTCConnected && (
+                  <span className="bg-success/20 text-success text-[10px] font-medium px-1.5 py-0.5 rounded flex items-center gap-1">
+                    <Wifi className="h-3 w-3" />
+                    Connected
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-3 text-white/70 text-xs">
                 <div className="flex items-center gap-1">
@@ -517,7 +568,6 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
             onClick={handleEndLive}
             variant="destructive"
             size="sm"
-            className="bg-red-500 hover:bg-red-600"
           >
             End
           </Button>
@@ -545,7 +595,7 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
 
       {/* Comments */}
       {showComments && (
-        <div className="absolute left-0 right-20 bottom-24 h-60 pointer-events-none">
+        <div className="absolute left-0 right-20 bottom-24 h-48 pointer-events-none">
           <div
             ref={commentsRef}
             className="h-full overflow-y-auto px-4 scrollbar-hide"
@@ -578,7 +628,7 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
           onClick={toggleMute}
           className={cn(
             "h-12 w-12 rounded-full flex items-center justify-center",
-            isMuted ? "bg-red-500" : "bg-white/20"
+            isMuted ? "bg-destructive" : "bg-white/20"
           )}
         >
           {isMuted ? (
@@ -592,7 +642,7 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
           onClick={toggleCamera}
           className={cn(
             "h-12 w-12 rounded-full flex items-center justify-center",
-            !isCameraOn ? "bg-red-500" : "bg-white/20"
+            !isCameraOn ? "bg-destructive" : "bg-white/20"
           )}
         >
           {isCameraOn ? (
@@ -653,5 +703,11 @@ export function LiveStreamBroadcast({ onClose, initialTitle }: LiveStreamBroadca
         }
       `}</style>
     </div>
+  );
+
+  // Use portal for true fullscreen overlay - renders outside normal DOM hierarchy
+  return createPortal(
+    isLive ? liveContent : preLiveContent,
+    document.body
   );
 }
