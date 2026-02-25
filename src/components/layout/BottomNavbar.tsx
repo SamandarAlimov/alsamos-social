@@ -4,7 +4,10 @@ import { cn } from '@/lib/utils';
 import { useUnreadMessages } from '@/hooks/useUnreadMessages';
 import { useNotificationSound } from '@/hooks/useNotificationSound';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
+import { SwitchAccountDialog } from '@/components/account/SwitchAccountDialog';
+import { useAuth } from '@/contexts/AuthContext';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 
 interface NavItem {
   icon: React.ElementType;
@@ -23,7 +26,11 @@ const bottomNavItems: NavItem[] = [
 
 export function BottomNavbar() {
   const location = useLocation();
+  const { profile } = useAuth();
   const { playMessageSound } = useNotificationSound();
+  const [switchAccountOpen, setSwitchAccountOpen] = useState(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isLongPress = useRef(false);
   
   const handleNewMessage = useCallback(() => {
     playMessageSound();
@@ -36,18 +43,50 @@ export function BottomNavbar() {
     return 0;
   };
 
+  const handleProfilePressStart = () => {
+    isLongPress.current = false;
+    longPressTimer.current = setTimeout(() => {
+      isLongPress.current = true;
+      setSwitchAccountOpen(true);
+      if (navigator.vibrate) navigator.vibrate(50);
+    }, 500);
+  };
+
+  const handleProfilePressEnd = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  const handleProfileClick = (e: React.MouseEvent) => {
+    if (isLongPress.current) {
+      e.preventDefault();
+      isLongPress.current = false;
+    }
+  };
+
   return (
+    <>
     <nav className="fixed bottom-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-lg border-t border-border md:hidden safe-area-bottom">
       <div className="flex items-center justify-around h-16 px-2">
         {bottomNavItems.map((item) => {
           const isActive = location.pathname === item.path;
           const isCreate = item.path === '/create';
+          const isProfile = item.path === '/profile';
           const badgeCount = getBadgeCount(item.badgeKey);
           
           return (
             <NavLink
               key={item.path}
               to={item.path}
+              onClick={isProfile ? handleProfileClick : undefined}
+              onMouseDown={isProfile ? handleProfilePressStart : undefined}
+              onMouseUp={isProfile ? handleProfilePressEnd : undefined}
+              onMouseLeave={isProfile ? handleProfilePressEnd : undefined}
+              onTouchStart={isProfile ? handleProfilePressStart : undefined}
+              onTouchEnd={isProfile ? handleProfilePressEnd : undefined}
+              onContextMenu={isProfile ? (e) => e.preventDefault() : undefined}
               className={cn(
                 "flex flex-col items-center justify-center gap-1 min-w-[60px] py-2 rounded-xl transition-all duration-200",
                 isCreate && "relative",
@@ -68,10 +107,22 @@ export function BottomNavbar() {
               ) : (
                 <>
                   <div className="relative">
-                    <item.icon className={cn(
-                      "h-6 w-6 transition-transform duration-200",
-                      isActive && "scale-110"
-                    )} />
+                    {isProfile && profile?.avatar_url ? (
+                      <Avatar className={cn(
+                        "h-6 w-6 border-2 transition-transform duration-200",
+                        isActive ? "border-primary scale-110" : "border-transparent"
+                      )}>
+                        <AvatarImage src={profile.avatar_url} />
+                        <AvatarFallback className="text-[10px]">
+                          {profile.display_name?.[0] || profile.username?.[0] || 'U'}
+                        </AvatarFallback>
+                      </Avatar>
+                    ) : (
+                      <item.icon className={cn(
+                        "h-6 w-6 transition-transform duration-200",
+                        isActive && "scale-110"
+                      )} />
+                    )}
                     <AnimatePresence>
                       {badgeCount > 0 && (
                         <motion.span
@@ -98,5 +149,7 @@ export function BottomNavbar() {
         })}
       </div>
     </nav>
+    <SwitchAccountDialog open={switchAccountOpen} onOpenChange={setSwitchAccountOpen} />
+    </>
   );
 }

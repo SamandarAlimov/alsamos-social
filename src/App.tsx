@@ -5,7 +5,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { GlobalCallProvider } from "@/contexts/GlobalCallContext";
+import { OnlinePresenceProvider } from "@/contexts/OnlinePresenceContext";
 import { AudioPlayerProvider } from "@/contexts/AudioPlayerContext";
+import { VideoPlayerProvider } from "@/contexts/VideoPlayerContext";
 import { ThemeProvider } from "next-themes";
 import { PushNotificationProvider } from "@/components/PushNotificationProvider";
 
@@ -28,6 +30,9 @@ import NotificationsPage from "./pages/NotificationsPage";
 import StoryArchivePage from "./pages/StoryArchivePage";
 import AIPage from "./pages/AIPage";
 import ActivityPage from "./pages/ActivityPage";
+import AdsPage from "./pages/AdsPage";
+import ChannelsPage from "./pages/ChannelsPage";
+import MiniAppsPage from "./pages/MiniAppsPage";
 import NotFound from "./pages/NotFound";
 
 // Layout
@@ -106,6 +111,9 @@ function AppRoutes() {
         <Route path="/story-archive" element={<StoryArchivePage />} />
         <Route path="/ai" element={<AIPage />} />
         <Route path="/activity" element={<ActivityPage />} />
+        <Route path="/ads" element={<AdsPage />} />
+        <Route path="/channels" element={<ChannelsPage />} />
+        <Route path="/mini-apps" element={<MiniAppsPage />} />
       </Route>
       
       {/* 404 */}
@@ -124,9 +132,11 @@ function AppWithGlobalCall() {
       <Sonner />
       {isAuthenticated ? (
         <PushNotificationProvider>
-          <GlobalCallProvider>
-            <AppRoutes />
-          </GlobalCallProvider>
+          <OnlinePresenceProvider>
+            <GlobalCallProvider>
+              <AppRoutes />
+            </GlobalCallProvider>
+          </OnlinePresenceProvider>
         </PushNotificationProvider>
       ) : (
         <AppRoutes />
@@ -140,11 +150,13 @@ const App = () => (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <TooltipProvider>
         <AudioPlayerProvider>
-          <AuthProvider>
-            <BrowserRouter>
-              <AppWithGlobalCall />
-            </BrowserRouter>
-          </AuthProvider>
+          <VideoPlayerProvider>
+            <AuthProvider>
+              <BrowserRouter>
+                <AppWithGlobalCall />
+              </BrowserRouter>
+            </AuthProvider>
+          </VideoPlayerProvider>
         </AudioPlayerProvider>
       </TooltipProvider>
     </ThemeProvider>

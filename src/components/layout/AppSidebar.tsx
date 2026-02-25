@@ -15,6 +15,7 @@ import {
   Compass,
   Wallet,
   Sparkles,
+  LayoutGrid,
   MoreHorizontal,
   Moon,
   Sun,
@@ -38,6 +39,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useTheme } from 'next-themes';
+import { SwitchAccountDialog } from '@/components/account/SwitchAccountDialog';
 
 interface NavItem {
   icon: React.ElementType;
@@ -57,6 +59,7 @@ const navItems: NavItem[] = [
   { icon: Map, label: 'Map', path: '/map' },
   { icon: Wallet, label: 'Payment', path: '/payment' },
   { icon: Sparkles, label: 'AI Assistant', path: '/ai' },
+  { icon: LayoutGrid, label: 'Mini Apps', path: '/mini-apps' },
   { icon: PlusSquare, label: 'Create', path: '/create' },
 ];
 
@@ -69,6 +72,7 @@ export function AppSidebar() {
   const navigate = useNavigate();
   const { user, profile, logout } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
+  const [showSwitchAccount, setShowSwitchAccount] = useState(false);
   const { playMessageSound } = useNotificationSound();
   const { theme, setTheme } = useTheme();
   
@@ -210,7 +214,7 @@ export function AppSidebar() {
                       )}
                       {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => navigate('/settings')}>
+                    <DropdownMenuItem onClick={() => setShowSwitchAccount(true)}>
                       <UserPlus className="h-4 w-4 mr-3" />
                       Switch Accounts
                     </DropdownMenuItem>
@@ -250,7 +254,7 @@ export function AppSidebar() {
                 )}
                 {theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => navigate('/settings')}>
+              <DropdownMenuItem onClick={() => setShowSwitchAccount(true)}>
                 <UserPlus className="h-4 w-4 mr-3" />
                 Switch Accounts
               </DropdownMenuItem>
@@ -278,6 +282,11 @@ export function AppSidebar() {
           <ChevronLeft className="h-4 w-4 text-muted-foreground" />
         )}
       </button>
+
+      <SwitchAccountDialog 
+        open={showSwitchAccount} 
+        onOpenChange={setShowSwitchAccount} 
+      />
     </aside>
   );
 }
