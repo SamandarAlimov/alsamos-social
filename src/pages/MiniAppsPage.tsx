@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Search, Star, Plus, Globe, X,
-  Sparkles, Trash2, Edit2, Loader2, AppWindow
+  Sparkles, Trash2, Edit2, Loader2, AppWindow, RotateCcw, ExternalLink
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,7 +16,6 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
-
 import { useToast } from "@/hooks/use-toast";
 
 interface MiniApp {
@@ -50,6 +49,67 @@ const categories = [
   { id: "other", label: "Boshqa" },
 ];
 
+// Known platforms that have embed URLs or can be iframed directly
+function getEmbedUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+
+    // YouTube
+    if (host === 'youtube.com' || host === 'm.youtube.com') {
+      const videoId = u.searchParams.get('v');
+      if (videoId) return `https://www.youtube.com/embed/${videoId}?autoplay=0`;
+      if (u.pathname.startsWith('/shorts/')) {
+        const id = u.pathname.split('/shorts/')[1]?.split(/[?#]/)[0];
+        if (id) return `https://www.youtube.com/embed/${id}`;
+      }
+      // Channel/homepage - use full embed
+      return `https://www.youtube.com/embed?listType=search&list=`;
+    }
+    if (host === 'youtu.be') {
+      const id = u.pathname.slice(1).split(/[?#]/)[0];
+      if (id) return `https://www.youtube.com/embed/${id}?autoplay=0`;
+    }
+
+    // Instagram - use embed
+    if (host === 'instagram.com' || host === 'm.instagram.com') {
+      if (/^\/(p|reel|tv)\//.test(u.pathname)) {
+        return `https://www.instagram.com${u.pathname}embed/`;
+      }
+    }
+
+    // Twitter/X - no reliable embed for full site
+    // Facebook - no reliable embed for full site
+    // LinkedIn - no reliable embed
+
+    // Telegram - web version works in iframe for channels
+    if (host === 't.me' || host === 'telegram.me') {
+      const path = u.pathname.replace(/^\//, '');
+      if (path && !path.includes('/')) {
+        return `https://t.me/s/${path}`;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// No platforms are forced external - all open in internal browser
+function shouldOpenExternal(_url: string): boolean {
+  return false;
+}
+
+type LoadMode = 'direct' | 'proxy' | 'embed';
+
+function getApiBase(): string {
+  const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
+  const projectId = (import.meta.env.VITE_SUPABASE_PROJECT_ID as string | undefined)?.trim();
+  const raw = supabaseUrl || (projectId ? `https://${projectId}.supabase.co` : "");
+  return raw.replace(/^http:\/\//, "https://");
+}
+
 export default function MiniAppsPage() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -73,6 +133,10 @@ export default function MiniAppsPage() {
   const [editIconFile, setEditIconFile] = useState<File | null>(null);
   const [editIconPreview, setEditIconPreview] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [iframeSrc, setIframeSrc] = useState("");
+  const [iframeReloadKey, setIframeReloadKey] = useState(0);
+  const [loadMode, setLoadMode] = useState<LoadMode>('direct');
+  const [normalizedAppUrl, setNormalizedAppUrl] = useState("");
 
   const fetchApps = async () => {
     const { data, error } = await supabase
@@ -90,7 +154,76 @@ export default function MiniAppsPage() {
   useEffect(() => {
     setIframeLoaded(false);
     setIframeError(false);
-  }, [openedApp]);
+    setIframeReloadKey(0);
+    setLoadMode('direct');
+  }, [openedApp?.id]);
+
+  // Determine iframe src based on app and load mode
+  useEffect(() => {
+    if (!openedApp) {
+      setIframeSrc("");
+      setNormalizedAppUrl("");
+      return;
+    }
+
+    const url = openedApp.url.startsWith("http://") || openedApp.url.startsWith("https://")
+      ? openedApp.url : `https://${openedApp.url}`;
+    setNormalizedAppUrl(url);
+
+    // 1. Check for embed URL first
+    const embedUrl = getEmbedUrl(url);
+    if (embedUrl && loadMode === 'direct') {
+      setLoadMode('embed');
+      setIframeSrc(embedUrl);
+      return;
+    }
+    if (loadMode === 'embed' && embedUrl) {
+      setIframeSrc(embedUrl);
+      return;
+    }
+
+    // 2. Direct iframe (for sites that allow it)
+    if (loadMode === 'direct') {
+      setIframeSrc(url);
+      return;
+    }
+
+    // 3. Proxy mode
+    if (loadMode === 'proxy') {
+      const apiBase = getApiBase();
+      if (!apiBase) {
+        setIframeError(true);
+        return;
+      }
+      setIframeSrc(`${apiBase}/functions/v1/mini-app-proxy?url=${encodeURIComponent(url)}&_ts=${Date.now()}-${iframeReloadKey}`);
+      return;
+    }
+  }, [openedApp, loadMode, iframeReloadKey]);
+
+  // Timeout: if direct/embed doesn't load in 8s, try proxy. If proxy doesn't load in 12s, show error.
+  useEffect(() => {
+    if (!openedApp || iframeLoaded || iframeError) return;
+
+    const timeoutMs = loadMode === 'proxy' ? 15000 : 8000;
+    const timeout = window.setTimeout(() => {
+      if (loadMode === 'direct' || loadMode === 'embed') {
+        // Fallback to proxy
+        setLoadMode('proxy');
+        setIframeLoaded(false);
+        setIframeError(false);
+      } else {
+        setIframeError(true);
+      }
+    }, timeoutMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [openedApp, iframeLoaded, iframeError, loadMode]);
+
+  const handleOpenInBrowser = useCallback(() => {
+    if (normalizedAppUrl) {
+      window.open(normalizedAppUrl, '_blank', 'noopener,noreferrer');
+    }
+  }, [normalizedAppUrl]);
 
   const handleCreate = async () => {
     if (!user) return;
@@ -100,7 +233,8 @@ export default function MiniAppsPage() {
     }
 
     try {
-      new URL(form.url);
+      const testUrl = form.url.startsWith('http') ? form.url : `https://${form.url}`;
+      new URL(testUrl);
     } catch {
       toast({ title: "Xato", description: "URL noto'g'ri formatda", variant: "destructive" });
       return;
@@ -110,7 +244,6 @@ export default function MiniAppsPage() {
 
     let finalIconUrl = form.icon_url.trim() || null;
 
-    // Upload icon file if selected
     if (iconFile) {
       setUploadingIcon(true);
       const fileExt = iconFile.name.split('.').pop();
@@ -186,7 +319,10 @@ export default function MiniAppsPage() {
       return;
     }
 
-    try { new URL(editForm.url); } catch {
+    try { 
+      const testUrl = editForm.url.startsWith('http') ? editForm.url : `https://${editForm.url}`;
+      new URL(testUrl);
+    } catch {
       toast({ title: "Xato", description: "URL noto'g'ri formatda", variant: "destructive" });
       return;
     }
@@ -239,21 +375,36 @@ export default function MiniAppsPage() {
     return true;
   });
 
-  const getProxyUrl = (url: string) => {
-    const apiBase = import.meta.env.VITE_SUPABASE_URL;
-    return `${apiBase}/functions/v1/mini-app-proxy?url=${encodeURIComponent(url)}`;
+  const handleOpenApp = (app: MiniApp) => {
+    const normalizedUrl = app.url.startsWith("http://") || app.url.startsWith("https://")
+      ? app.url : `https://${app.url}`;
+
+    // If it's a platform that can only open externally, do that
+    if (shouldOpenExternal(normalizedUrl)) {
+      window.open(normalizedUrl, '_blank', 'noopener,noreferrer');
+      toast({ title: "Tashqi brauzerda ochildi", description: `${app.name} tashqi brauzerda ochildi` });
+      return;
+    }
+
+    try {
+      new URL(normalizedUrl);
+      setOpenedApp({ ...app, url: normalizedUrl });
+      setSelectedApp(null);
+    } catch {
+      toast({ title: "Xato", description: "Mini app URL noto'g'ri", variant: "destructive" });
+    }
   };
 
   return (
     <div className="min-h-screen bg-background">
-      <ScrollArea className="h-[calc(100vh-4rem)] md:h-screen">
-        <div className="max-w-4xl mx-auto px-4 py-5 pb-24 md:pb-8">
+      <div className="h-[calc(100vh-7.5rem)] sm:h-[calc(100vh-4rem)] md:h-screen overflow-y-auto scrollbar-hidden">
+        <div className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-4 sm:py-5 pb-24 md:pb-8">
 
           {/* Header */}
-          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between mb-6">
+          <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between mb-4 sm:mb-6">
             <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-foreground mb-1">Mini Apps</h1>
-              <p className="text-sm text-muted-foreground">O'z ilovangizni yarating yoki boshqalarnikini kashf qiling</p>
+              <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-foreground mb-0.5 sm:mb-1">Mini Apps</h1>
+              <p className="text-xs sm:text-sm text-muted-foreground">O'z ilovangizni yarating yoki boshqalarnikini kashf qiling</p>
             </div>
             {user && (
               <Button onClick={() => setShowCreate(true)} className="rounded-xl gap-2">
@@ -264,13 +415,13 @@ export default function MiniAppsPage() {
           </motion.div>
 
           {/* Search */}
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }} className="relative mb-5">
-            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }} className="relative mb-4 sm:mb-5">
+            <Search className="absolute left-3 sm:left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Mini app qidirish..."
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="pl-10 h-11 rounded-xl bg-card/50 backdrop-blur-sm border-border/50"
+              className="pl-9 sm:pl-10 h-10 sm:h-11 rounded-xl bg-card/50 backdrop-blur-sm border-border/50"
             />
             {search && (
               <Button variant="ghost" size="icon" className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8" onClick={() => setSearch("")}>
@@ -280,13 +431,13 @@ export default function MiniAppsPage() {
           </motion.div>
 
           {/* Categories */}
-          <div className="flex gap-2 overflow-x-auto pb-3 mb-5 scrollbar-hidden -mx-1 px-1">
+          <div className="flex gap-1.5 sm:gap-2 overflow-x-auto pb-2 sm:pb-3 mb-4 sm:mb-5 scrollbar-hidden -mx-3 sm:-mx-4 md:-mx-6 px-3 sm:px-4 md:px-6" style={{ WebkitOverflowScrolling: 'touch' }}>
             {categories.map(cat => (
               <button
                 key={cat.id}
                 onClick={() => setActiveCategory(cat.id)}
                 className={cn(
-                  "px-3.5 py-2 rounded-xl text-sm font-medium whitespace-nowrap border transition-all flex-shrink-0",
+                  "px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-medium whitespace-nowrap border transition-all flex-shrink-0",
                   activeCategory === cat.id
                     ? "bg-primary text-primary-foreground border-primary shadow-md shadow-primary/20"
                     : "bg-card/40 text-muted-foreground border-border/50 hover:bg-card/70 hover:text-foreground"
@@ -318,7 +469,7 @@ export default function MiniAppsPage() {
               )}
             </motion.div>
           ) : (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-2 sm:gap-3">
               {filtered.map((app, i) => (
                 <motion.button
                   key={app.id}
@@ -329,23 +480,22 @@ export default function MiniAppsPage() {
                   whileTap={{ scale: 0.97 }}
                   onClick={() => setSelectedApp(app)}
                   className={cn(
-                    "relative group flex flex-col items-center text-center p-3 sm:p-4 rounded-2xl",
+                    "relative group flex flex-col items-center text-center p-2.5 sm:p-3 md:p-4 rounded-xl sm:rounded-2xl",
                     "border border-border/50 backdrop-blur-xl bg-card/40 hover:bg-card/70",
                     "transition-all duration-300 hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5"
                   )}
                 >
-                  {/* Icon */}
-                  <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-2.5 bg-muted/50 overflow-hidden border border-border/30">
+                  <div className="w-11 h-11 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl flex items-center justify-center mb-2 sm:mb-2.5 bg-muted/50 overflow-hidden border border-border/30">
                     {app.icon_url ? (
-                      <img src={app.icon_url} alt={app.name} className="w-10 h-10 rounded-xl object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                      <img src={app.icon_url} alt={app.name} className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl object-cover" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                     ) : (
-                      <Globe className="h-7 w-7 text-primary" />
+                      <Globe className="h-5 w-5 sm:h-7 sm:w-7 text-primary" />
                     )}
                   </div>
 
-                  <h3 className="text-xs sm:text-sm font-semibold text-foreground leading-tight line-clamp-1">{app.name}</h3>
+                  <h3 className="text-[11px] sm:text-xs md:text-sm font-semibold text-foreground leading-tight line-clamp-1 w-full">{app.name}</h3>
 
-                  <div className="flex items-center gap-1 text-[10px] text-muted-foreground mt-1">
+                  <div className="flex items-center gap-0.5 sm:gap-1 text-[9px] sm:text-[10px] text-muted-foreground mt-0.5 sm:mt-1">
                     <Star className="h-2.5 w-2.5 text-amber-400 fill-amber-400" />
                     <span>{app.rating}</span>
                   </div>
@@ -354,7 +504,7 @@ export default function MiniAppsPage() {
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* App Detail / Info Sheet */}
       <AnimatePresence>
@@ -437,13 +587,19 @@ export default function MiniAppsPage() {
 
                 <Button
                   className="w-full h-12 rounded-2xl text-base font-semibold gap-2"
-                  onClick={() => {
-                    setOpenedApp(selectedApp);
-                    setSelectedApp(null);
-                  }}
+                  onClick={() => handleOpenApp(selectedApp)}
                 >
-                  <AppWindow className="h-5 w-5" />
-                  Ochish
+                  {shouldOpenExternal(selectedApp.url) ? (
+                    <>
+                      <ExternalLink className="h-5 w-5" />
+                      Brauzerda ochish
+                    </>
+                  ) : (
+                    <>
+                      <AppWindow className="h-5 w-5" />
+                      Ochish
+                    </>
+                  )}
                 </Button>
 
                 {user && selectedApp.user_id === user.id && (
@@ -483,7 +639,7 @@ export default function MiniAppsPage() {
             className="fixed inset-0 z-[9999] bg-background flex flex-col"
           >
             {/* Browser Header */}
-            <div className="flex items-center gap-3 px-3 py-2 border-b border-border/50 bg-card/80 backdrop-blur-xl flex-shrink-0">
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-card/80 backdrop-blur-xl flex-shrink-0">
               <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" onClick={() => setOpenedApp(null)}>
                 <X className="h-4 w-4" />
               </Button>
@@ -496,37 +652,104 @@ export default function MiniAppsPage() {
                   )}
                 </div>
                 <span className="text-sm font-medium text-foreground truncate">{openedApp.name}</span>
-                <span className="text-xs text-muted-foreground truncate hidden sm:inline">{openedApp.url}</span>
+                {loadMode === 'proxy' && (
+                  <Badge variant="secondary" className="text-[9px] px-1.5 py-0">proksi</Badge>
+                )}
               </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 rounded-full"
+                onClick={() => {
+                  setIframeError(false);
+                  setIframeLoaded(false);
+                  setIframeReloadKey(prev => prev + 1);
+                }}
+                title="Qayta yuklash"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 rounded-full"
+                onClick={handleOpenInBrowser}
+                title="Brauzerda ochish"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
             </div>
 
             {/* Content */}
             <div className="flex-1 relative">
               {!iframeLoaded && !iframeError && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background">
+                <div className="absolute inset-0 flex items-center justify-center bg-background z-10">
                   <div className="flex flex-col items-center gap-3">
                     <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                    <span className="text-sm text-muted-foreground">Yuklanmoqda...</span>
+                    <span className="text-sm text-muted-foreground">
+                      {loadMode === 'proxy' ? 'Proksi orqali yuklanmoqda...' : 'Yuklanmoqda...'}
+                    </span>
                   </div>
                 </div>
               )}
               {iframeError && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background">
+                <div className="absolute inset-0 flex items-center justify-center bg-background z-10">
                   <div className="flex flex-col items-center gap-3 text-center px-6">
                     <Globe className="h-12 w-12 text-muted-foreground/40" />
-                    <p className="text-sm text-muted-foreground font-medium">Mini app ichki ko'rinishda yuklanmadi</p>
+                    <p className="text-base font-medium text-foreground">Yuklanmadi</p>
+                    <p className="text-sm text-muted-foreground max-w-xs">
+                      Bu sayt ichki ko'rinishda yuklanishi mumkin emas. Brauzerda ochib ko'ring.
+                    </p>
+                    <div className="flex gap-2 mt-2">
+                      <Button
+                        variant="outline"
+                        className="rounded-xl gap-2"
+                        onClick={() => {
+                          setIframeError(false);
+                          setIframeLoaded(false);
+                          if (loadMode !== 'proxy') {
+                            setLoadMode('proxy');
+                          } else {
+                            setIframeReloadKey(prev => prev + 1);
+                          }
+                        }}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        Qayta urinish
+                      </Button>
+                      <Button
+                        className="rounded-xl gap-2"
+                        onClick={handleOpenInBrowser}
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                        Brauzerda ochish
+                      </Button>
+                    </div>
                   </div>
                 </div>
               )}
-              <iframe
-                src={getProxyUrl(openedApp.url)}
-                className="w-full h-full border-0"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-                allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone"
-                title={openedApp.name}
-                onLoad={() => setIframeLoaded(true)}
-                onError={() => setIframeError(true)}
-              />
+              {iframeSrc && (
+                <iframe
+                  key={`${openedApp.id}-${loadMode}-${iframeReloadKey}`}
+                  src={iframeSrc}
+                  className="w-full h-full border-0"
+                  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation allow-modals allow-downloads allow-presentation"
+                  allow="accelerometer; autoplay; camera; clipboard-read; clipboard-write; encrypted-media; geolocation; gyroscope; microphone; picture-in-picture; web-share; fullscreen"
+                  referrerPolicy="no-referrer-when-downgrade"
+                  title={openedApp.name}
+                  onLoad={() => {
+                    setIframeLoaded(true);
+                    setIframeError(false);
+                  }}
+                  onError={() => {
+                    if (loadMode === 'direct' || loadMode === 'embed') {
+                      setLoadMode('proxy');
+                    } else {
+                      setIframeError(true);
+                    }
+                  }}
+                />
+              )}
             </div>
           </motion.div>
         )}
